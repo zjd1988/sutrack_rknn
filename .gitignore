@@ -1,6 +1,12 @@
-# 模型文件 (体积大, 不入库)
+# 模型文件与视频 (体积大, 不入库)
+models/
 *.onnx
 *.rknn
+*.avi
+*.mp4
+
+# RKNN 运行时二进制
+runtime/librknnrt.so
 
 # Python
 __pycache__/
@@ -10,3 +16,4 @@ __pycache__/
 
 # 系统
 .DS_Store
+.vscode/

@@ -1,20 +1,21 @@
 # SUTrack-RKNN
 
-将 [SUTrack](https://github.com/chenxin-dlut/SUTrack) 视觉跟踪模型(ONNX 版本,来自 [whyb/SUTrack-ONNX](https://github.com/whyb/SUTrack-ONNX))转换为 **RKNN** 格式(瑞芯微 NPU,如 RK3588),并在 **PC 上通过 RKNN 仿真器**验证转换后的模型精度。
+将 [SUTrack](https://github.com/chenxin-dlut/SUTrack) 视觉跟踪模型(ONNX 版本,来自 [whyb/SUTrack-ONNX](https://github.com/whyb/SUTrack-ONNX))转换为 **RKNN** 格式(瑞芯微 NPU),并完成了从转换、精度验证到真实视频跟踪测速的全流程验证。
 
-## 项目结构
+- 实测平台: **鲁班猫3 开发板 (RK3576, 双核 NPU, Debian 12)**
+- 转换与验证可**全部在开发板上完成**(rknn-toolkit2 2.x 提供 aarch64 支持),PC 仿真器验证为可选路径(x86 Linux)
+- 提供 **Python / C++ 双实现**的视频跟踪测速程序,管线与官方 `video_track_onnx.py` 一致
 
-```
-sutrack_rknn/
-├── convert_onnx_to_rknn.py   # ONNX -> RKNN 转换脚本 (支持 FP16 / INT8 量化)
-├── verify_rknn_accuracy.py   # PC 仿真器精度验证脚本 (与 ONNX Runtime 对比)
-├── requirements.txt          # Python 依赖
-└── README.md
-```
+> 面向 AI 代理/开发者的操作手册(环境搭建、命令、开发板接入、踩坑记录)见 [AGENTS.md](AGENTS.md)。
 
-> 模型文件(.onnx / .rknn)体积较大,不纳入仓库,请按下文指引下载或自行转换生成。
+## 功能特性
 
-## 1. 模型说明
+- **ONNX -> RKNN 转换**: 支持 FP16 / INT8 量化,目标平台 rk3562 ~ rk3588(含 rk3576)
+- **三级精度验证**: PC 仿真器 vs ONNX Runtime、板端 NPU vs ONNX Runtime(余弦相似度 / argmax 一致性 / bbox IoU)
+- **真实视频跟踪测速**: 分项耗时统计(解码/预处理/NPU 推理/后处理),Python 与 C++ 双实现
+- **多核 NPU 实测**: 单核/双核/双实例并发吞吐对比
+
+## 模型说明
 
 SUTrack ONNX 模型输入输出(以 `sutrack_t224` 为例):
 
@@ -30,87 +31,65 @@ SUTrack ONNX 模型输入输出(以 `sutrack_t224` 为例):
 | `size_map` | `[1, 2, 14, 14]` |
 | `offset_map` | `[1, 2, 14, 14]` |
 
-模型 zoo 及下载链接见 [SUTrack-ONNX Releases](https://github.com/whyb/SUTrack-ONNX/releases)(Tiny/Base/Large,224/384 分辨率,本流程对 5 个变体均适用)。
+模型 zoo(Tiny/Base/Large,224/384 分辨率,本流程对 5 个变体均适用)及下载见 [SUTrack-ONNX Releases](https://github.com/whyb/SUTrack-ONNX/releases)。模型与视频文件存放于 `models/`(不纳入仓库)。
+
+## 快速开始
 
 ```bash
-# 下载最小的 Tiny 模型 (106MB)
-wget https://github.com/whyb/SUTrack-ONNX/releases/download/onnx/sutrack_t224.onnx
+# 1. 板端(或 x86 Linux)安装工具链并转换, 详见 AGENTS.md
+python python/convert_onnx_to_rknn.py --onnx models/sutrack_t224.onnx --platform rk3576
+
+# 2. 板端 NPU 精度验证 (vs ONNX Runtime)
+python python/verify_rknn_on_board.py --onnx sutrack_t224.onnx --rknn sutrack_t224_rk3576.rknn
+
+# 3. 真实视频跟踪测速 (Python 与 C++ 双实现, 命令见 AGENTS.md)
+python python/video_track_rknn.py --video vtest.avi --rknn sutrack_t224_rk3576.rknn --bbox 496,156,38,76 --save track_out.mp4
 ```
 
-## 2. 环境搭建
+## 实测结果 (鲁班猫3 / RK3576)
 
-rknn-toolkit2 对 Python 版本和依赖版本比较敏感,**推荐 Python 3.10**:
+### 精度: 板端 NPU vs ONNX Runtime (FP16, 5 组样本)
 
-```bash
-# 创建虚拟环境 (以 uv 为例, conda/venv 亦可)
-uv venv --python 3.10 .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-注意事项(实测踩坑记录):
-
-- rknn-toolkit2 2.3.2 最高支持 Python 3.12,但 `onnx` 需要 **≤ 1.17**(新版移除了 `onnx.mapping`),而 onnx ≤1.14 没有 cp312 预编译包,因此 Python 3.12 + onnx 组合不可行,**直接用 Python 3.10 最省事**。
-- 新版 setuptools (≥81) 移除了 `pkg_resources`,需锁定 `setuptools<81`。
-
-## 3. ONNX -> RKNN 转换
-
-```bash
-# FP16 (不量化, 精度最高), 目标平台 RK3588
-python convert_onnx_to_rknn.py --onnx sutrack_t224.onnx --platform rk3588
-# 输出: sutrack_t224_rk3588.rknn
-
-# INT8 量化 (需要提供校准数据集列表 txt)
-python convert_onnx_to_rknn.py --onnx sutrack_t224.onnx --platform rk3588 --quant --dataset dataset.txt
-```
-
-支持的 `--platform`:`rk3562 / rk3566 / rk3568 / rk3576 / rk3588 / rv1103 / rv1106 / rk2118`。
-
-说明:模型输入 `template` / `search` 已经是预处理后的 float32 归一化张量(6 通道),因此转换时**不配置 mean/std**,RKNN 端不做额外预处理,预处理逻辑保持在应用侧(参考 [video_track_onnx.py](https://github.com/whyb/SUTrack-ONNX/blob/main/video_track_onnx.py))。
-
-## 4. PC 仿真器精度验证
-
-```bash
-python verify_rknn_accuracy.py --onnx sutrack_t224.onnx --rknn sutrack_t224_rk3588.rknn --platform rk3588 --num-tests 5
-```
-
-验证内容:
-
-- 各输出张量的**余弦相似度 / 最大绝对误差 / 平均绝对误差 / 相对 L2 误差**
-- `score_map` 的 **argmax 位置**是否一致(跟踪取点)
-- 按 SUTrack 后处理解码出的 **bbox IoU / 中心点偏移**
-
-> 注意:RKNN PC 仿真器(`init_runtime(target=None)`)要求从原始 ONNX 现场 `load_onnx` + `build`;通过 `load_rknn` 加载的预编译 `.rknn` 文件**不能在仿真器上运行**。导出的 `.rknn` 文件用于真实 NPU 设备部署(rknn-lite 或 `init_runtime(target='rk3588')` 连板推理)。
-
-## 5. 实测验证结果
-
-`sutrack_t224` → RK3588 FP16,5 组随机样本,RKNN PC 仿真器 vs ONNX Runtime:
-
-| 输出 | 余弦相似度 (均值) | 相对 L2 误差 (均值) |
+| 输出 | 余弦相似度 | 相对 L2 误差 |
 | :--- | :---: | :---: |
-| `score_map` | 0.999998 | 0.19% |
-| `size_map` | 1.000000 | 0.06% |
-| `offset_map` | 0.999999 | 0.15% |
+| `score_map` | 0.999981 | 0.62% |
+| `size_map` | 0.999997 | 0.25% |
+| `offset_map` | 0.999987 | 0.50% |
 
-- **score_map argmax 位置一致率: 5/5**(跟踪取点完全一致)
-- **解码 bbox IoU ≥ 0.994**,中心点偏移 < 0.001(归一化坐标)
+- argmax 位置一致率 **5/5**,解码 bbox IoU 0.95 ~ 0.996 — FP16 转换在真实 NPU 上精度可靠
 
-结论:FP16 转换基本无损,转换后的模型精度可靠。如需进一步压缩提速,可准备校准数据转 INT8 后用同一脚本复测精度。
+### 性能: 真实视频跟踪 (vtest.avi 768x576@10fps)
 
-## 6. 部署到 RK3588
+| 实现 | 端到端帧率 | NPU 推理 | 实时性 |
+| :--- | ---: | ---: | :--- |
+| Python | 7.05 FPS | 109.5 ms/帧 | 0.71x |
+| C++ | 7.72 FPS | 98.2 ms/帧 | 0.77x |
 
-将生成的 `.rknn` 文件拷贝到开发板,使用 rknn-toolkit-lite2:
+- 全程 647 帧稳定跟踪目标行人;**FP16 暂不能实时**,瓶颈在 NPU 推理(Transformer 注意力算子回退 CPU)
+- 多核 NPU 对本模型提升有限(双核并发仅 1.14x),有效提速路径: **INT8 量化**
 
-```python
-from rknnlite.api import RKNNLite
-rknn = RKNNLite()
-rknn.load_rknn('sutrack_t224_rk3588.rknn')
-rknn.init_runtime()  # 板端 NPU
-outputs = rknn.inference(inputs=[template, search, template_anno], data_format='nchw')
+## 实测记录文档
+
+| 文档 | 内容 |
+| :--- | :--- |
+| [docs/verify_result.md](docs/verify_result.md) | PC 仿真器精度验证 (RK3588, x86 Linux) |
+| [docs/verify_result_board.md](docs/verify_result_board.md) | 板端 NPU 精度验证 + 板端环境搭建记录 |
+| [docs/video_benchmark.md](docs/video_benchmark.md) | 真实视频跟踪测速 (Python / C++ 对比) |
+| [docs/multicore_benchmark.md](docs/multicore_benchmark.md) | 多核 NPU 吞吐实测 + librknnrt 升级方法 |
+
+## 目录结构
+
 ```
-
-前/后处理逻辑与 `verify_rknn_accuracy.py` 及原版 `video_track_onnx.py` 完全一致。
+sutrack_rknn/
+├── python/      # 转换 / 仿真器验证 / 板端验证 / 视频跟踪 (Python)
+├── cpp/         # 视频跟踪 (C++, rknn_api + OpenCV)
+├── runtime/     # rknn_api.h + librknnrt.so v2.3.2
+├── tools/       # 板端 SSH/SFTP 工具, 多核吞吐实测脚本
+├── docs/        # 各阶段实测记录
+├── models/      # 模型与测试视频 (不入库)
+├── AGENTS.md    # 开发操作手册 (环境/命令/板端信息/踩坑)
+└── README.md
+```
 
 ## 参考
 
