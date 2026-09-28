@@ -89,7 +89,14 @@ def main():
     parser.add_argument('--rknn', type=str, default='./sutrack_t224_rk3576.rknn')
     parser.add_argument('--num-tests', type=int, default=5, help='随机测试样本数')
     parser.add_argument('--repeat', type=int, default=20, help='测速重复次数 (取最后一组输入)')
+    parser.add_argument('--split', action='store_true', default=None,
+                        help='拆分模型模式 (4 输入: template/search/mask_0/mask_1; 默认按文件名含 maskin 自动判断)')
+    parser.add_argument('--anno-sub', type=str, default='./anno_submodel.onnx',
+                        help='mask 预处理子模型路径 (split 模式需要)')
     args = parser.parse_args()
+
+    if args.split is None:
+        args.split = 'maskin' in os.path.basename(args.rknn)
 
     for p in (args.onnx, args.rknn):
         if not os.path.exists(p):
@@ -106,6 +113,14 @@ def main():
     out_names = [o.name for o in ort_session.get_outputs()]
     print('ONNX outputs:', out_names)
 
+    sess_mask = None
+    if args.split:
+        if not os.path.exists(args.anno_sub):
+            print(f'Error: anno sub model not found: {args.anno_sub}')
+            sys.exit(1)
+        sess_mask = ort.InferenceSession(args.anno_sub, providers=['CPUExecutionProvider'])
+        print(f'split mode: mask from {args.anno_sub}')
+
     from rknnlite.api import RKNNLite
     rknn = RKNNLite(verbose=False)
     print(f'==> Loading RKNN model: {args.rknn}')
@@ -121,7 +136,11 @@ def main():
         last_inputs = inputs
 
         onnx_outs = ort_session.run(None, inputs)
-        rknn_inputs = [inputs['template'], inputs['search'], inputs['template_anno']]
+        if args.split:
+            m0, m1 = sess_mask.run(None, {'template_anno': inputs['template_anno']})
+            rknn_inputs = [inputs['template'], inputs['search'], m0, m1]
+        else:
+            rknn_inputs = [inputs['template'], inputs['search'], inputs['template_anno']]
         rknn_outs = rknn.inference(inputs=rknn_inputs, data_format='nchw')
 
         results = compare_outputs(onnx_outs, rknn_outs, out_names)
@@ -153,7 +172,11 @@ def main():
     print(f'  argmax 位置一致率: {bbox_ok}/{args.num_tests}')
 
     # NPU 推理耗时
-    rknn_inputs = [last_inputs['template'], last_inputs['search'], last_inputs['template_anno']]
+    if args.split:
+        m0, m1 = sess_mask.run(None, {'template_anno': last_inputs['template_anno']})
+        rknn_inputs = [last_inputs['template'], last_inputs['search'], m0, m1]
+    else:
+        rknn_inputs = [last_inputs['template'], last_inputs['search'], last_inputs['template_anno']]
     rknn.inference(inputs=rknn_inputs, data_format='nchw')  # warmup
     t0 = time.perf_counter()
     for _ in range(args.repeat):

@@ -111,7 +111,14 @@ def main():
     parser.add_argument('--bbox', type=str, required=True, help='初始框 x,y,w,h (第一帧)')
     parser.add_argument('--save', type=str, default=None, help='保存标注结果视频 (如 track_out.mp4)')
     parser.add_argument('--max-frames', type=int, default=0, help='最多处理帧数 (0=全部)')
+    parser.add_argument('--split', action='store_true', default=None,
+                        help='拆分模型模式 (4 输入含 mask; 默认按文件名含 maskin 自动判断)')
+    parser.add_argument('--anno-sub', type=str, default='./anno_submodel.onnx',
+                        help='mask 预处理子模型路径 (split 模式需要)')
     args = parser.parse_args()
+
+    if args.split is None:
+        args.split = 'maskin' in os.path.basename(args.rknn)
 
     for p in (args.video, args.rknn):
         if not os.path.exists(p):
@@ -163,6 +170,24 @@ def main():
     prev_box_crop = transform_image_to_crop(state, state, resize_factor, template_size)
     template_anno_list = [prev_box_crop] * num_templates
 
+    # split 模式: mask 预处理子模型 (输入 template_anno, 输出 mask_0/mask_1)
+    sess_mask = None
+    masks = [None, None]
+    if args.split:
+        if not os.path.exists(args.anno_sub):
+            print(f'Error: anno sub model not found: {args.anno_sub}')
+            return
+        import onnxruntime as ort
+        sess_mask = ort.InferenceSession(args.anno_sub, providers=['CPUExecutionProvider'])
+        print(f'split mode: mask from {args.anno_sub}')
+
+    def update_masks():
+        if sess_mask is not None:
+            anno_input = np.stack(template_anno_list, axis=0)[np.newaxis, ...].astype(np.float32)
+            masks[0], masks[1] = sess_mask.run(None, {'template_anno': anno_input})
+
+    update_masks()
+
     if writer is not None:
         b = [int(v) for v in state]
         cv2.rectangle(first_frame, (b[0], b[1]), (b[0] + b[2], b[1] + b[3]), (0, 255, 0), 3)
@@ -187,11 +212,14 @@ def main():
 
         template_input = np.stack(template_list, axis=0)[np.newaxis, ...]
         search_input = np.stack([search], axis=0)[np.newaxis, ...]
-        template_anno_input = np.stack(template_anno_list, axis=0)[np.newaxis, ...].astype(np.float32)
         t2 = time.perf_counter()
 
-        rknn_outs = rknn.inference(inputs=[template_input, search_input, template_anno_input],
-                                   data_format='nchw')
+        if args.split:
+            rknn_inputs = [template_input, search_input, masks[0], masks[1]]
+        else:
+            template_anno_input = np.stack(template_anno_list, axis=0)[np.newaxis, ...].astype(np.float32)
+            rknn_inputs = [template_input, search_input, template_anno_input]
+        rknn_outs = rknn.inference(inputs=rknn_inputs, data_format='nchw')
         t3 = time.perf_counter()
 
         score_map = np.asarray(rknn_outs[0], dtype=np.float32).reshape(1, 1, feat_sz, feat_sz)
@@ -213,6 +241,7 @@ def main():
             template_anno_list.append(prev_box_crop)
             if len(template_anno_list) > num_templates:
                 template_anno_list.pop(1)
+            update_masks()
 
         if writer is not None:
             b = [int(v) for v in state]

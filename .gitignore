@@ -5,6 +5,10 @@ models/
 *.avi
 *.mp4
 
+# 校准数据与中间产物 (可重新生成)
+calib*/
+tmp_onnx/
+
 # RKNN 运行时二进制
 runtime/librknnrt.so
 
