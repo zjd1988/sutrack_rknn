@@ -68,6 +68,13 @@ python python/video_track_rknn.py --video vtest.avi --rknn sutrack_t224_rk3576.r
 - 全程 647 帧稳定跟踪目标行人;**FP16 暂不能实时**,瓶颈在 NPU 推理(Transformer 注意力算子回退 CPU)
 - 多核 NPU 对本模型提升有限(双核并发仅 1.14x),有效提速路径: **INT8 量化**
 
+### 拆分模型 (mask 输入) 与量化探索 (x86 服务器, PC 仿真器, 目标 rk3576/rk3588)
+
+- **拆分转换无损**: anno-only 子图(含全部逻辑算子)剪为预处理子模型, 主模型变 4 输入; FP16 cos_sim ≥ 0.999998, argmax 5/5, IoU ≥ 0.99
+- **w8a8 全量化不可用** (拆分后仍 argmax 0~1/5, 根因是激活量化误差而非算子回退); `w8a16` 在 rk3576/rk3588 均不被 toolkit 2.3.2 支持
+- **w16a16i_dfp 基本可用** (rk3588/rk3576): cos_sim ≥ 0.99987, argmax 4/5, IoU mean 0.89 — 精度优先的量化兜底方案
+- 自动混合量化对拆分模型不可用 (mask 输入无 batch 维); INT8 级提速只剩手动混合量化路径, 详见 [docs/verify_result_split.md](docs/verify_result_split.md)
+
 ## 实测记录文档
 
 | 文档 | 内容 |
@@ -76,6 +83,7 @@ python python/video_track_rknn.py --video vtest.avi --rknn sutrack_t224_rk3576.r
 | [docs/verify_result_board.md](docs/verify_result_board.md) | 板端 NPU 精度验证 + 板端环境搭建记录 |
 | [docs/video_benchmark.md](docs/video_benchmark.md) | 真实视频跟踪测速 (Python / C++ 对比) |
 | [docs/multicore_benchmark.md](docs/multicore_benchmark.md) | 多核 NPU 吞吐实测 + librknnrt 升级方法 |
+| [docs/verify_result_split.md](docs/verify_result_split.md) | 拆分模型 (mask 输入) 转换 + PC 仿真器精度验证 (x86 服务器) |
 
 ## 目录结构
 

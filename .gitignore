@@ -8,6 +8,7 @@ models/
 # 校准数据与中间产物 (可重新生成)
 calib*/
 tmp_onnx/
+tmp_build/
 
 # RKNN 运行时二进制
 runtime/librknnrt.so

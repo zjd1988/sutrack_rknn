@@ -13,6 +13,7 @@ sutrack_rknn/
 ├── python/
 │   ├── convert_onnx_to_rknn.py    # ONNX -> RKNN 转换 (FP16 / INT8)
 │   ├── verify_rknn_accuracy.py    # PC 仿真器精度验证 (vs ONNX Runtime)
+│   ├── verify_split_rknn_accuracy.py  # 拆分模型 (4 输入) PC 仿真器验证, 内联转换+导出, 支持 quant/hybrid
 │   ├── verify_rknn_on_board.py    # 板端 NPU 精度验证 (rknn-lite2, 含测速)
 │   └── video_track_rknn.py        # 板端视频跟踪测速 (Python 实现)
 ├── cpp/
@@ -24,6 +25,9 @@ sutrack_rknn/
 ├── tools/
 │   ├── board_ssh.py               # SSH 远程执行: python tools/board_ssh.py "<cmd>"
 │   ├── board_push.py              # SFTP 推送: MSYS_NO_PATHCONV=1 python tools/board_push.py <files...> <remote_dir>
+│   ├── build_split_model.py       # 构建 mask 输入拆分模型 (剪掉 anno-only 子图, 移除逻辑算子)
+│   ├── gen_calib_maskin_synth.py  # 拆分模型 INT8 合成校准数据 (无真实视频时用)
+│   ├── gen_calib_maskin_pc.py     # 拆分模型 INT8 真实视频校准数据 (需 vtest.avi)
 │   └── bench_multicore.py         # 多核 NPU 吞吐实测 (在板端运行)
 ├── docs/                          # 实测记录 (改动行为后需同步更新)
 ├── models/                        # 模型与测试视频 (*.onnx/*.rknn/*.avi/*.mp4, 全部不入库)
@@ -96,6 +100,11 @@ python tools/bench_multicore.py --rknn sutrack_t224_rk3576.rknn --repeat 30
 
 ## 关键技术事实 (避免重复踩坑)
 
+- **拆分模型 (mask 输入) 是当前主线**: `tools/build_split_model.py` 把 anno-only 子图 (含全部逻辑算子) 剪成 `anno_submodel.onnx`, 主模型变为 4 输入 (template, search, mask_0, mask_1), FP16 精度无损 (ORT 逐元素 0 差异)。PC 仿真器验证用 `python/verify_split_rknn_accuracy.py` (内联转换+导出+对比, 支持 --quant/--hybrid)。详见 `docs/verify_result_split.md`。
+- **w8a8 全量化即使拆分后仍不可用** (argmax 0~1/5): 拆分只消除了 Less 算子回退报错, 崩溃根因是 Transformer 激活量化误差; normal/kl_divergence 均救不回。
+- **quantized_dtype 支持矩阵 (toolkit 2.3.2 实测)**: w8a8/w16a16i(_dfp) 全平台支持; **w8a16 仅 rk3562 接受** 且本模型 build 阶段原生崩溃 (malloc corrupted, 不可评估); **w4a16 仅 rk3576**。rk3576/rk3588 上精度优先的量化兜底方案是 **w16a16i_dfp** (argmax 4/5, IoU mean 0.89)。
+- **自动混合量化对拆分模型不可用**: `hybrid_quantization_step1(proposal=True)` 与 `quantized_hybrid_level>0` 都要求 expand batch, 而 mask 输入 `(2,49,1)` 无 batch 维, 直接报错; 只能 `proposal=False` 出全量化 cfg 后手动填 `custom_quantize_layers`。
+- **x86 大模型转换要设 TMPDIR**: rknn build 的临时文件写 /tmp, 若 /tmp 是小 tmpfs (如 512MB) 会 ENOSPC 或原生崩溃, `TMPDIR=<大磁盘目录>` 解决。
 - **RKNN PC 仿真器** (`init_runtime(target=None)`) 只能跑现场 `load_onnx`+`build` 的模型;`load_rknn` 的预编译模型**不能**在仿真器运行。`.rknn` 预编译文件用于真实 NPU。
 - **RKNN 模型按平台编译**: rk3588 平台产物不要直接拿去 rk3576 跑,用 `--platform rk3576` 重新转换。
 - **多核 NPU 对本模型无效**: 单实例推理只落单核,`core_mask=NPU_CORE_0_1` 延迟仅改善 3%,双实例并发吞吐仅 1.14x — 瓶颈是 Transformer 注意力算子回退 CPU,提速靠 INT8 量化。详见 `docs/multicore_benchmark.md`。
